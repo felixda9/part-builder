@@ -53,7 +53,8 @@ export class RefsPanel {
       this.sections.push(s);
       this.body.append(s.el);
     };
-    sec((r) => isEmpty(r), (r) => (isEmpty(r) ? h('div', { class: 'empty', style: { padding: '4px 0 8px' } }, 'No reference images yet. Claude generates them during the reference stage.') : null));
+    sec((r) => isEmpty(r), (r) => (isEmpty(r) ? h('div', { class: 'empty', style: { padding: '4px 0 8px' } }, 'No reference images yet. Claude makes them, or upload your own.') : null));
+    sec(() => 'static', () => this.uploads());
     sec((r) => [r.hero, this.store.state?.busy ?? null], (r) => this.hero(r));
     sec((r) => [r.views, r.viewsApproved], (r) => this.views(r));
     sec((r) => r.sheet, (r) => (r.sheet ? [h('h3', null, 'Sheet'), this.wide(r.sheet.url, r.sheet.label ?? 'reference sheet')] : null));
@@ -202,6 +203,31 @@ export class RefsPanel {
           class: `btn${refs.viewsApproved ? '' : ' primary'}`, disabled: refs.viewsApproved,
           onclick: () => this.store.send({ type: 'ui', action: 'approve_views' }),
         }, refs.viewsApproved ? '✓ Views approved' : 'Approve views')),
+    ];
+  }
+
+  /** Upload your own picture as the hero or a view (cut out on the server). */
+  private uploads(): Built {
+    const targets: [string, string][] = [['hero', 'Hero'], ['front', 'Front'], ['right', 'Side'], ['back', 'Back'], ['top', 'Top']];
+    const input = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp', style: { display: 'none' } });
+    let target = 'hero';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      input.value = '';
+      if (!file) return;
+      const q = target === 'hero' ? 'kind=hero' : `kind=view&view=${target}`;
+      try {
+        const res = await fetch(`/api/upload?${q}`, { method: 'POST', body: file });
+        const r = await res.json() as { message?: string; error?: string };
+        toast(r.error ?? r.message ?? 'uploaded', r.error ? 'warn' : 'ok');
+      } catch (e) {
+        toast(`Upload failed: ${(e as Error).message}`, 'warn');
+      }
+    };
+    return [
+      h('h3', null, 'Your own pictures'),
+      h('div', { class: 'btns', title: 'A plain background or a transparent PNG works best. The side view faces right.' },
+        input, targets.map(([id, label]) => h('button', { class: 'mini', onclick: () => { target = id; input.click(); } }, `↑ ${label}`))),
     ];
   }
 

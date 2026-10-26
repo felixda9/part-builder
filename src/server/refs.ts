@@ -1,5 +1,5 @@
-// Reference images: generation (Nano Banana), slicing, segmentation, normalization to studs,
-// consistency checks, measurement, part close-ups.
+// Reference images: generation, the user's own pictures, slicing, segmentation, normalization to
+// studs, consistency checks, measurement, part close-ups.
 //
 // Files in projects/<name>/refs/:
 //   hero_N.png            hero candidates (3/4 view)
@@ -18,11 +18,12 @@ import { extractLines, findDarkSpots, findSpots, imageEdges, interior, luminance
 import { type RefFrame, type RefView, type RefImage, REF_VIEWS, viewLabel } from '../core/protocol';
 import { poseRefFile } from './body';
 import { fakeCloseup, fakeHero, fakeSheet, fakeView } from './fake';
+import { comfyConfig } from './comfy';
 import { type RefInput, MODELS } from './gemini';
-import { type GenRequest, type GenResult, type Provider, generateImage, pickProvider, totalCost } from './imagegen';
+import { type GenRequest, type GenResult, type Provider, fakeMode, generateImage, pickProvider, totalCost } from './imagegen';
 import { contactSheet, gridSvg } from './images';
 import {
-  type Mask, type RGBImage, boundary, deltaE, estimateBackground, flipX, hexToRgb, maskArea, maskBBox, palette,
+  type Lab, type Mask, type RGBImage, boundary, deltaE, estimateBackground, flipX, hexToRgb, maskArea, maskBBox, palette,
   coreCenter, despill, rgbToLab, segmentKey, symmetryAxis,
 } from './imaging';
 import { type CloseupView, type KeyColor, KEY_COLORS, closeupPrompt, editPrompt, heroFromPosePrompt, heroPrompt, sheetPrompt, stylePrompt, viewPrompt } from './prompts';
@@ -71,6 +72,20 @@ async function saveMask(m: Mask, file: string): Promise<void> {
 }
 
 const keyRGB = (k: KeyColor) => hexToRgb(k.hex);
+
+/** The key color furthest from every color of the subject. */
+function farthestKey(subject: Lab[], fallback: KeyColor): KeyColor {
+  if (!subject.length) return fallback;
+  let best = fallback, bestD = -1;
+  for (const k of KEY_COLORS) {
+    const lab = rgbToLab(...keyRGB(k));
+    const d = Math.min(...subject.map((p) => deltaE(p, lab)));
+    if (d > bestD + 5) { bestD = d; best = k; }
+  }
+  return best;
+}
+
+export type ImportTarget = { kind: 'hero' } | { kind: 'view'; view: RefView };
 
 /** Layout guide for the turnaround sheet: four columns with ground/top lines on the key color. */
 export async function sheetTemplate(key: KeyColor): Promise<Buffer> {
@@ -393,6 +408,123 @@ export class Refs {
     this.s.saveMeta();
     this.s.saveRefs();
     return f;
+  }
+
+  // ------------------------------------------------------------------ your own pictures
+
+  /**
+   * Use a picture from elsewhere (a drawing, a photo, another AI tool) as the hero or as a view.
+   * The subject is cut out and put on a key color like a generated image, so everything after
+   * this treats it the same. A hero is picked right away.
+   */
+  async importImage(src: Buffer, target: ImportTarget): Promise<{ file: string; how: string }> {
+    const { img, mask, alpha, how } = await this.cutOut(src);
+    const internal = this.internal();
+    const key = farthestKey(palette(img, mask, 8).map((p) => rgbToLab(...hexToRgb(p.hex))), internal.key);
+    const k = keyRGB(key);
+
+    // Crop to the subject with a margin; heroes are square like generated ones.
+    const bb = maskBBox(mask)!;
+    const pad = Math.round(Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY) * 0.08) + 4;
+    let x0 = bb.minX - pad, y0 = bb.minY - pad, w = bb.maxX - bb.minX + 1 + 2 * pad, h = bb.maxY - bb.minY + 1 + 2 * pad;
+    if (target.kind === 'hero') {
+      const s = Math.max(w, h);
+      x0 -= Math.floor((s - w) / 2); y0 -= Math.floor((s - h) / 2); w = h = s;
+    }
+    const out = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const sx = x0 + x, sy = y0 + y, o = (y * w + x) * 3;
+      const inside = sx >= 0 && sy >= 0 && sx < img.width && sy < img.height;
+      const i = sy * img.width + sx;
+      const a = !inside ? 0 : alpha ? alpha[i] / 255 : mask.data[i];
+      for (let c = 0; c < 3; c++) out[o + c] = Math.round(a * (inside ? img.data[i * 3 + c] : 0) + (1 - a) * k[c]);
+    }
+    const png = await sharp(out, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+
+    if (target.kind === 'hero') {
+      const id = `hero_${this.s.refs.hero.candidates.length + 1}`;
+      const f = this.file(`${id}.png`);
+      fs.writeFileSync(f, png);
+      internal.key = key;
+      delete internal.interactions[id];
+      this.saveInternal(internal);
+      this.s.refs.hero.candidates.push({ id, url: this.s.url(f), label: 'Your picture' });
+      this.s.refs.hero.picked = id;
+      this.s.meta.checkpoints.hero = id;
+      this.s.meta.stage = 'views';
+      this.s.saveMeta();
+      this.s.saveRefs();
+      return { file: f, how };
+    }
+    const { view } = target;
+    const f = this.file(`raw_${view}.png`);
+    if (fs.existsSync(f)) fs.copyFileSync(f, this.file(`raw_${view}.prev.png`));
+    fs.writeFileSync(f, png);
+    delete internal.interactions[view];
+    this.saveInternal(internal);
+    this.setRaw(view, f);
+    this.s.refs.viewsApproved = false;
+    this.s.meta.checkpoints.viewsApproved = false;
+    this.s.saveMeta();
+    this.s.saveRefs();
+    return { file: f, how };
+  }
+
+  /** Find the subject: transparency, else a plain background, else BiRefNet on ComfyUI. */
+  private async cutOut(src: Buffer): Promise<{ img: RGBImage; mask: Mask; alpha: Uint8Array | null; how: string }> {
+    const { data, info } = await sharp(src).rotate().resize({ width: 1536, height: 1536, fit: 'inside', withoutEnlargement: true })
+      .ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const n = info.width * info.height;
+    const rgb = new Uint8Array(n * 3), alpha = new Uint8Array(n);
+    let clear = 0;
+    for (let i = 0; i < n; i++) {
+      rgb[i * 3] = data[i * 4]; rgb[i * 3 + 1] = data[i * 4 + 1]; rgb[i * 3 + 2] = data[i * 4 + 2];
+      alpha[i] = data[i * 4 + 3];
+      if (alpha[i] < 128) clear++;
+    }
+    const img: RGBImage = { width: info.width, height: info.height, data: rgb };
+    const usable = (m: Mask) => !!maskBBox(m) && maskArea(m) > n * 0.01 && maskArea(m) < n * 0.97;
+
+    if (clear > n * 0.02) {
+      const mask: Mask = { width: info.width, height: info.height, data: alpha.map((a) => (a >= 128 ? 1 : 0)) };
+      if (usable(mask)) return { img, mask, alpha, how: 'transparent background' };
+    }
+    // A plain background: most of the border is one color. The cut-off follows how flat it is,
+    // so a light grey part on a white background survives.
+    const bg = estimateBackground(img);
+    const bgLab = rgbToLab(...bg);
+    const near: number[] = [];
+    let border = 0;
+    const at = (x: number, y: number) => {
+      const i = (y * img.width + x) * 3;
+      border++;
+      const d = deltaE(rgbToLab(rgb[i], rgb[i + 1], rgb[i + 2]), bgLab);
+      if (d < 20) near.push(d);
+    };
+    for (let x = 0; x < img.width; x++) { at(x, 0); at(x, img.height - 1); }
+    for (let y = 0; y < img.height; y++) { at(0, y); at(img.width - 1, y); }
+    if (near.length / border >= 0.6) {
+      // A colored backdrop (like the key colors) keeps the normal settings, which also remove its
+      // shadows; a white or grey one gets a cut-off that follows its noise and no hue rule.
+      const noise = near.sort((a, b) => a - b)[Math.floor(near.length * 0.9)];
+      const tolerance = Math.min(28, Math.max(8, noise * 1.5 + 5));
+      const neutral = Math.max(...bg) - Math.min(...bg) < 40;
+      const { mask } = segmentKey(img, bg, neutral ? { tolerance, holeTolerance: tolerance * 0.7, hue: false } : {});
+      // Remove the backdrop's color cast from the subject, as refs_normalize does for key colors.
+      if (usable(mask)) return { img: neutral ? img : despill(img, bg, mask), mask, alpha: null, how: 'plain background' };
+    }
+    if (comfyConfig() && !fakeMode()) {
+      const key = KEY_COLORS[0];
+      const r = await this.gen('import_cutout', {
+        prompt: '', workflow: 'rembg.json', provider: 'comfyui', keyColor: keyRGB(key),
+        refs: [{ label: 'IMAGE', data: await sharp(src).png().toBuffer(), mime: 'image/png' }],
+        aspectRatio: `${info.width}:${info.height}`, imageSize: n > 1.3e6 ? '2K' : '1K',
+      });
+      const cut = await loadRGB(await sharp(r.image).resize({ width: info.width, height: info.height, fit: 'fill' }).toBuffer());
+      const { mask } = segmentKey(cut, keyRGB(key));
+      if (usable(mask)) return { img: cut, mask, alpha: null, how: 'background removed on ComfyUI' };
+    }
+    throw new Error('Could not find the background in that picture. Use one with a plain background or a transparent PNG (ComfyUI, if set up, can remove any background).');
   }
 
   /** Edit an image in place through its interaction history. target: hero_N | sheet | <view> | part:<Name>:<view>. */

@@ -25,7 +25,8 @@ Put each file in ComfyUI's `models/<folder>/`. File names must match the workflo
 | [BiRefNet](https://huggingface.co/Comfy-Org/BiRefNet) | background removal | yes (MIT) |
 | [Pixal3D](https://huggingface.co/Comfy-Org/Pixal3D) + [TRELLIS.2](https://huggingface.co/Comfy-Org/TRELLIS.2) | optional image to 3D | yes (MIT; its DINOv3 encoder has [Meta's license](https://ai.meta.com/resources/models-and-libraries/dinov3-license/)) |
 
-With ComfyUI, the default steps use Qwen-Image, so for commercial work use Gemini.
+With ComfyUI, the default steps use Qwen-Image, so for commercial work use an API key instead
+(Gemini, OpenAI, fal.ai or Replicate; check the terms of the model you pick).
 
 Files:
 - FLUX.2 klein: `diffusion_models/flux-2-klein-4b-fp8.safetensors`,

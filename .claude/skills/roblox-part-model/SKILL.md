@@ -39,10 +39,11 @@ print it - check it before planning and follow it all the way through:
 - `free`: only the overall theme (what it is, mood, palette family); design the build yourself
   and use the references for scale. Likeness is information only.
 If the level changes mid-build (a note "similarity set to ..." appears), re-plan.
-Image source: `comfyui` (the user's own GPU, free) or `gemini` (paid). With `COMFYUI_SSH`,
-ComfyUI is started on the other PC on the first image (~40 s), then ~20-30 s per image. If the
-first image fails, tell the user; don't silently switch to the paid source. `image_backend
-status` / `test` diagnose the connection.
+Image source: `comfyui` (the user's own GPU, free) or a paid API: `gemini`, `openai`, `fal`,
+`replicate`. With `COMFYUI_SSH`, ComfyUI is started on the other PC on the first image (~40 s),
+then ~20-30 s per image. If the first image fails, tell the user; don't silently switch to
+another source. `image_backend status` / `test` show what is set up and diagnose it. With no
+source at all, the user's own pictures still work (`refs_import`).
 
 ### 1. Style (optional)
 `style {action:'list'|'get'}`. Example screenshots in `styles/<name>/` are sent along as style
@@ -53,6 +54,8 @@ references. Tune the text with `style {action:'save', description, avoid}` and p
 `refs_generate {kind:'hero', count:3}`. Describe the candidates briefly, then STOP and wait for
 the user to pick (Pick button in the editor, or in chat; then `refs_pick {hero}`). If none fit,
 regenerate with `extra` describing what to change, or `refs_edit` one candidate.
+The user's own picture: `refs_import {kind:'hero', file}` (a path or URL) instead; it is picked
+right away. They can also upload it in the editor (References > Your own pictures); a note says so.
 
 ### 3. Views - CHECKPOINT 2
 Views: `front`, `side` and `back`, plus `top` when it helps. There is ONE side view (the
@@ -64,6 +67,10 @@ model's right side, facing image-right); the left side is its mirror, so never g
    `method:'prompt'` draws the view from a prompt instead.
    Gemini: `refs_generate {kind:'sheet'}` (front | side | back from the hero), then
    `refs_generate {kind:'view', view:'top'}` if wanted.
+   OpenAI, fal, Replicate: `refs_generate {kind:'view', view}` one view at a time, as above.
+   The user's own views: `refs_import {kind:'view', view, file}` for each one they have (or editor
+   uploads); generate the rest from the hero. With no image source set up they must supply
+   front, side and back. A refused picture needs a plain background or a transparent PNG.
 2. `refs_normalize` - read the report and look at both images:
    - segmentation overlay: the red outline must hug the subject. Specks or holes -> adjust
      `tolerance` (higher removes more background, lower keeps more subject).
@@ -222,6 +229,6 @@ Work through the lists in this order:
   protrude or inset by at least 0.05. Write every plan number as a multiple of 0.05 (save
   refuses others). Small details (eyes, glints, noses) must not share any face plane with each
   other; if the check names one, move it by 0.05.
-- Gemini images cost money (3-5 US cents each): only use `provider:'gemini'` when the user
-  agrees. Don't loop endlessly on free images either - after 3 failed redos of the same view,
-  ask the user.
+- API images cost money (a few US cents each): use a paid source other than the default only
+  when the user agrees. Don't loop endlessly on free images either - after 3 failed redos of the
+  same view, ask the user.

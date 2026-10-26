@@ -6,7 +6,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { CommandError } from '../core/commands';
-import type { ClientMessage, StateMessage } from '../core/protocol';
+import { type ClientMessage, type StateMessage, REF_VIEWS, toRefView, viewLabel } from '../core/protocol';
 import { exportModel } from './exporter';
 import { loadPlan, planText } from './plan';
 import { WEB_DIST, log } from './paths';
@@ -71,6 +71,13 @@ export async function startHttp(session: Session, preferredPort: number): Promis
       }
       return;
     }
+    if (url.pathname === '/api/upload' && req.method === 'POST') {
+      void upload(req, url).then(
+        (message) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ message })); },
+        (e: Error) => { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); },
+      );
+      return;
+    }
     if (url.pathname.startsWith('/files/')) {
       const f = inside(session.dir, decodeURIComponent(url.pathname.slice(7)));
       if (!f) { res.writeHead(403); res.end(); return; }
@@ -112,6 +119,32 @@ export async function startHttp(session: Session, preferredPort: number): Promis
       .then(() => session.emit('notice', { message: 'New hero candidates are ready - pick one', level: 'info' }))
       .catch((e: Error) => session.emit('notice', { message: `Making heroes failed: ${e.message}`, level: 'warn' }))
       .finally(() => session.setBusy(null));
+  }
+
+  // "Upload" in the editor: the user's own picture as the hero or a view (?kind=hero | ?kind=view&view=front).
+  async function upload(req: http.IncomingMessage, url: URL): Promise<string> {
+    if (session.busy) throw new Error(`busy: ${session.busy}`);
+    const kind = url.searchParams.get('kind');
+    const view = url.searchParams.get('view');
+    if (kind !== 'hero' && !(kind === 'view' && view && (REF_VIEWS as string[]).includes(toRefView(view)))) throw new Error('bad upload target');
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const c of req) {
+      size += (c as Buffer).length;
+      if (size > 25 * 2 ** 20) throw new Error('picture is larger than 25 MB');
+      chunks.push(c as Buffer);
+    }
+    session.setBusy('Importing your picture…');
+    try {
+      const target = kind === 'hero' ? { kind: 'hero' as const } : { kind: 'view' as const, view: toRefView(view!) };
+      const { how } = await new Refs(session).importImage(Buffer.concat(chunks), target);
+      const what = kind === 'hero' ? 'hero picture (picked)' : `${viewLabel(toRefView(view!))} view`;
+      session.refs.feedback.push({ view: kind === 'view' ? viewLabel(toRefView(view!)) : undefined, text: `uploaded their own ${what}`, time: new Date().toISOString() });
+      session.saveRefs();
+      return `Your ${what} is in (${how})`;
+    } finally {
+      session.setBusy(null);
+    }
   }
 
   wss.on('connection', (ws) => {

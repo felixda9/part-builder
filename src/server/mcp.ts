@@ -7,9 +7,7 @@ import { type Command, CommandError, zCommand } from '../core/commands';
 import type { Vec3 } from '../core/math';
 import type { ViewName } from '../core/raster';
 import { exportModel } from './exporter';
-import { comfyConfig } from './comfy';
-import { hasApiKey } from './gemini';
-import { defaultProvider, fakeMode, totalCost } from './imagegen';
+import { PROVIDERS, configured, defaultProvider, fakeMode, totalCost } from './imagegen';
 import { registerRefsTools } from './mcp-refs';
 import { describeScene, sceneBounds } from '../core/summary';
 import { lintScene } from '../core/lints';
@@ -68,8 +66,8 @@ export function createMcpServer(session: Session, ctx: { editorUrl: () => string
         `checkpoints: hero=${m.checkpoints.hero ?? 'not picked'}, views approved=${m.checkpoints.viewsApproved}`,
         `refs: ${r.hero.candidates.length} hero candidate(s), views ${Object.keys(r.views).join('/') || 'none'}${Object.values(r.views).some((v) => v?.frame) ? ' (normalized)' : ''}, close-ups: ${Object.keys(r.parts).join(', ') || 'none'}`,
         `model: ${session.scene.parts.length} parts at rev ${session.history.rev}${b ? `, size ${b.size.join(' x ')}` : ''}; ${session.iterations.length} evaluation round(s)${session.iterations.length ? `, last score ${session.iterations[session.iterations.length - 1].score}` : ''}`,
-        `image source: ${fakeMode() ? 'FAKE images (offline test mode)' : defaultProvider() ?? 'NONE - set COMFYUI_URL (local GPU) or GEMINI_API_KEY in .env'}` +
-          ` (comfyui ${comfyConfig() ? comfyConfig()!.url : 'not set'}, gemini ${hasApiKey() ? 'key set' : 'no key'}); ${cost.calls} image call(s), ${cost.local} local, $${cost.usd.toFixed(3)} spent`,
+        `image source: ${fakeMode() ? 'FAKE images (offline test mode)' : defaultProvider() ?? 'NONE - set an API key or COMFYUI_URL in .env, or use the user\'s own pictures (refs_import)'}` +
+          ` (set up: ${PROVIDERS.filter(configured).join(', ') || 'none'}); ${cost.calls} image call(s), ${cost.local} local, $${cost.usd.toFixed(3)} spent`,
         `editor: ${ctx.editorUrl()}`,
         `other projects: ${Session.list().filter((p) => p !== m.name).join(', ') || '-'}`,
         ...(fb.length ? [`User notes: ${fb.map((f) => `${f.view ? `[${f.view}] ` : ''}${f.text}`).join(' | ')}`] : []),

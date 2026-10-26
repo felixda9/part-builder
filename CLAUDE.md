@@ -10,14 +10,15 @@ rigged `.rbxmx` / Luau export. The modelling procedure: `.claude/skills/roblox-p
 - `node scripts/smoke-mcp.mjs [outDir]` - drives the MCP server end to end
 - `npx tsx scripts/smoke-refs.ts [outDir]` - offline reference pipeline test (fake images of a demo
   knight; evaluate must score ~0.99)
+- `npx tsx scripts/smoke-import.ts [outDir]` - offline test of the user's own pictures (`refs_import`)
 - `npx tsx scripts/plan-preview.ts <project> <plan.json> [outDir]` - build a plan offline: checks,
   evaluation, renders. `scripts/apply-plan.ts <plan.json>` builds it in the running editor.
 - `npx tsx scripts/comfy-check.ts` - tests the ComfyUI connection
 - Optional 3D AI path (image -> textured mesh): `scripts/make-3d.ts <project>` ->
   `scripts/view-3d.ts <project> <glb>` -> `scripts/export-3d.ts <project> <glb>`
 - Image source (`.env`, see `.env.example`): ComfyUI (`COMFYUI_URL` or `COMFYUI_SSH`,
-  `docs/local-gpu.md`) or Gemini (`GEMINI_API_KEY`). `PART_BUILDER_FAKE_IMAGES=1` = offline
-  test mode.
+  `docs/local-gpu.md`) or an API key (Gemini, OpenAI, fal.ai, Replicate). Or none: the user's own
+  pictures (`refs_import`, editor uploads). `PART_BUILDER_FAKE_IMAGES=1` = offline test mode.
 
 ## Layout
 - `src/core/` pure TS shared by server + browser: `scene` (schemas), `shapes` (geometry, mirror),
@@ -25,8 +26,8 @@ rigged `.rbxmx` / Luau export. The modelling procedure: `.claude/skills/roblox-p
   mirrors), `lints`, `history`, `raster` (CPU renderer), `export/` (rig, rbxmx, luau)
 - `src/server/` Node: `session` (project + history on disk), `http` (static + WS), `mcp` +
   `mcp-refs` (tools), `render`, `images`, `imagegen` (provider switch + cost log), `comfy`,
-  `remote` (starts ComfyUI on another PC over SSH), `gemini`, `prompts`, `styles`, `refs`
-  (generate/slice/normalize/measure), `imaging` (segmentation, metrics), `likeness`, `evaluate`,
+  `remote` (starts ComfyUI on another PC over SSH), `gemini`, `apis` (OpenAI, fal.ai,
+  Replicate), `prompts`, `styles`, `refs` (generate/import/slice/normalize/measure), `imaging` (segmentation, metrics), `likeness`, `evaluate`,
   `plan` (build plan: schema, checks, plan -> commands), `similarity`, `fake` (offline images)
 - `styles/<name>/` style presets, `comfy/workflows/` ComfyUI workflows, `web/` editor (Vite +
   Three.js), `projects/<name>/` per-project data (gitignored)

@@ -1,6 +1,7 @@
 // MCP tools for reference images, part planning, style presets and evaluation.
 
 import fs from 'node:fs';
+import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import sharp from 'sharp';
 import { z } from 'zod';
@@ -9,6 +10,7 @@ import type { CloseupView } from './prompts';
 import { blockout } from './blockout';
 import { analyzeRefs, checkPlan, loadPlan, planBox, planText, planToCommands, zBuildPlan, zCloseupView } from './plan';
 import { evaluate } from './evaluate';
+import { falModels, hasFal, hasOpenAI, hasReplicate, openaiModel, replicateModel } from './apis';
 import { comfyConfig, comfyStatus } from './comfy';
 import { hasApiKey } from './gemini';
 import { type Provider, defaultProvider, fakeMode, generateImage, pickProvider } from './imagegen';
@@ -26,7 +28,7 @@ const fail = (e: unknown) => ({ content: [text(`ERROR: ${e instanceof Error ? e.
 const zRefView = z.enum(['front', 'side', 'back', 'top', 'right', 'left']).describe("front, side (the model's right side, facing image-right), back, top");
 const zVec3 = z.tuple([z.number(), z.number(), z.number()]);
 const zModel = z.enum(['flash', 'pro']).optional().describe("Gemini only: flash = Nano Banana 2.1 (default), pro = Nano Banana Pro (real style references, ~3-4x the price)");
-const zProvider = z.enum(['gemini', 'comfyui']).optional().describe('image source: comfyui = your ComfyUI server (free), gemini = Nano Banana API (paid). Default: IMAGE_PROVIDER in .env');
+const zProvider = z.enum(['gemini', 'openai', 'fal', 'replicate', 'comfyui']).optional().describe('image source: comfyui = your ComfyUI server (free); gemini (Nano Banana), openai, fal, replicate = paid APIs. Default: IMAGE_PROVIDER in .env, else the first one configured');
 
 const zPlanPart = z.object({
   name: z.string().describe('group/bone name, e.g. Head, Torso, RightArm'),
@@ -43,6 +45,18 @@ async function imagesSheet(files: string[], labels: string[]): Promise<Buffer> {
   return contactSheet(tiles, { tileHeight: 400 });
 }
 
+/** An image from a file path or an http(s) URL. */
+async function readImageSource(src: string): Promise<Buffer> {
+  if (/^https?:\/\//i.test(src)) {
+    const res = await fetch(src);
+    if (!res.ok) throw new Error(`could not download ${src}: HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  const f = path.resolve(src);
+  if (!fs.existsSync(f)) throw new Error(`no file at ${f}`);
+  return fs.readFileSync(f);
+}
+
 function notes(session: Session): string {
   const fb = session.refs.feedback.slice(-5);
   return fb.length ? `\nUser notes from the editor:\n${fb.map((f) => `  - [${f.time.slice(11, 16)}${f.view ? ` ${f.view}` : ''}] ${f.text}`).join('\n')}` : '';
@@ -54,7 +68,7 @@ export function registerRefsTools(server: McpServer, session: Session): void {
 
   server.registerTool('image_backend', {
     title: 'Image source status',
-    description: 'Which image source is used (comfyui = local GPU over the network, gemini = Nano Banana API), whether it is reachable, the GPU, and how the ComfyUI workflows were understood (prompt / reference-image / size / seed / output nodes). action "test" generates one quick image to prove the whole path works.',
+    description: 'Which image source is used (comfyui = your own GPU; gemini, openai, fal, replicate = paid APIs) and which are set up; for ComfyUI also whether it is reachable, the GPU, and how the workflows were understood. action "test" generates one quick image to prove the whole path works.',
     inputSchema: {
       action: z.enum(['status', 'test']),
       provider: zProvider,
@@ -66,6 +80,9 @@ export function registerRefsTools(server: McpServer, session: Session): void {
       const lines = [
         `default image source: ${def ?? 'none configured'}${fakeMode() ? ' (FAKE images mode is on)' : ''}`,
         `gemini: ${hasApiKey() ? 'API key set' : 'no API key'}`,
+        `openai: ${hasOpenAI() ? `API key set, model ${openaiModel()}` : 'no API key'}`,
+        `fal: ${hasFal() ? `key set, models ${falModels().text} / ${falModels().edit}` : 'no key'}`,
+        `replicate: ${hasReplicate() ? `token set, model ${replicateModel()}` : 'no token'}`,
       ];
       const cfg = comfyConfig();
       lines.push(cfg ? await comfyStatus(cfg) : 'comfyui: COMFYUI_URL not set (see docs/local-gpu.md)');
@@ -195,6 +212,33 @@ export function registerRefsTools(server: McpServer, session: Session): void {
     try {
       const f = await refs().flip(toRefView(a.view));
       return { content: [jpeg(await imagesSheet([f], [`${a.view} (mirrored)`])), text(`mirrored ${f} (previous kept as .prev.png). Re-run refs_normalize.`)] };
+    } catch (e) {
+      return fail(e);
+    }
+  });
+
+  server.registerTool('refs_import', {
+    title: 'Use your own picture',
+    description: `Use the user's own picture (a drawing, a photo, an image from another AI tool) instead of a generated one. Free; no image source needed.
+  hero: a three-quarter picture of the subject. It becomes the picked hero; views can then be generated from it, or imported too.
+  view: one of the views (front, side, back, top). The side view must face image-right (refs_flip fixes that). Re-run refs_normalize afterwards.
+The subject is cut out automatically: a plain background or a transparent PNG works best.`,
+    inputSchema: {
+      kind: z.enum(['hero', 'view']),
+      view: zRefView.optional(),
+      file: z.string().describe('path to a png/jpg/webp file, or an http(s) URL'),
+    },
+  }, async (a) => {
+    try {
+      if (a.kind === 'view' && !a.view) return fail('view is required for kind "view"');
+      const data = await readImageSource(a.file);
+      const target = a.kind === 'hero' ? { kind: 'hero' as const } : { kind: 'view' as const, view: toRefView(a.view!) };
+      const { file, how } = await refs().importImage(data, target);
+      const label = a.kind === 'hero' ? 'your hero' : viewLabel(toRefView(a.view!));
+      const next = a.kind === 'hero'
+        ? 'It is the picked hero now. Next: generate the views from it (refs_generate) or import them (refs_import kind "view").'
+        : 'Import or generate the other views, then refs_normalize and CHECKPOINT 2.';
+      return { content: [jpeg(await imagesSheet([file], [label])), text(`saved ${file} (${how}).\n${next}`)] };
     } catch (e) {
       return fail(e);
     }

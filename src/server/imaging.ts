@@ -64,6 +64,9 @@ export interface SegmentOptions {
   holeTolerance?: number;
   /** Minimum size (px) of an enclosed key-colored region to be removed. */
   minHole?: number;
+  /** Also count the key's darker / blended shades as background (default true). Turn off for a
+   *  neutral background (white, grey), where every grey part of the subject has the key's hue. */
+  hue?: boolean;
 }
 
 /**
@@ -89,7 +92,7 @@ export function segmentKey(img: RGBImage, key?: [number, number, number], opts: 
     dist[i] = deltaE(rgbToLab(r, g, b), kLab);
     const s = r + g + b;
     // Same hue family as the key, just darker (shadow) or blended (fringe).
-    const chroma = s > 0.15 * kSum ? Math.abs(r / s - kc[0]) + Math.abs(g / s - kc[1]) + Math.abs(b / s - kc[2]) : 9;
+    const chroma = opts.hue !== false && s > 0.15 * kSum ? Math.abs(r / s - kc[0]) + Math.abs(g / s - kc[1]) + Math.abs(b / s - kc[2]) : 9;
     keyish[i] = dist[i] < tol || chroma < 0.07 ? 1 : 0;
   }
   const bg = new Uint8Array(n);

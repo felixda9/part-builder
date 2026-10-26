@@ -1,14 +1,35 @@
 // One entry point for image generation, whatever the source:
-//   gemini   Nano Banana through the Gemini API (paid per image)
-//   comfyui  a ComfyUI server, on this PC or another one (free)
-// Default from .env IMAGE_PROVIDER, else whichever is configured (Gemini key, then ComfyUI URL).
+//   gemini     Nano Banana through the Gemini API (paid per image)
+//   openai     OpenAI Images API, or a service with the same API (paid)
+//   fal        any image model on fal.ai (paid)
+//   replicate  any image model on Replicate (paid)
+//   comfyui    a ComfyUI server, on this PC or another one (free)
+// Default from .env IMAGE_PROVIDER, else the first one configured in that order.
 
 import fs from 'node:fs';
+import { falGenerate, hasFal, hasOpenAI, hasReplicate, openaiGenerate, replicateGenerate } from './apis';
 import { comfyConfig, comfyGenerate, sizeFor } from './comfy';
 import { type RefInput, geminiGenerate, hasApiKey, MODELS } from './gemini';
 
-export type Provider = 'gemini' | 'comfyui';
-export const PROVIDERS: Provider[] = ['gemini', 'comfyui'];
+export type Provider = 'gemini' | 'openai' | 'fal' | 'replicate' | 'comfyui';
+export const PROVIDERS: Provider[] = ['gemini', 'openai', 'fal', 'replicate', 'comfyui'];
+
+/** What each source needs in .env. */
+const NEEDS: Record<Provider, string> = {
+  gemini: 'GEMINI_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  fal: 'FAL_KEY',
+  replicate: 'REPLICATE_API_TOKEN',
+  comfyui: 'COMFYUI_URL or COMFYUI_SSH (see docs/local-gpu.md)',
+};
+
+export function configured(p: Provider): boolean {
+  if (p === 'gemini') return hasApiKey();
+  if (p === 'openai') return hasOpenAI();
+  if (p === 'fal') return hasFal();
+  if (p === 'replicate') return hasReplicate();
+  return !!comfyConfig();
+}
 
 export interface GenRequest {
   prompt: string;
@@ -44,22 +65,18 @@ export interface GenResult {
 export const fakeMode = () => process.env.PART_BUILDER_FAKE_IMAGES === '1';
 
 export function defaultProvider(): Provider | null {
-  const p = process.env.IMAGE_PROVIDER?.trim().toLowerCase();
-  if (p === 'gemini' || p === 'comfyui') return p;
-  if (hasApiKey()) return 'gemini';
-  if (comfyConfig()) return 'comfyui';
-  return null;
+  const p = process.env.IMAGE_PROVIDER?.trim().toLowerCase() as Provider | undefined;
+  if (p && PROVIDERS.includes(p)) return p;
+  return PROVIDERS.find(configured) ?? null;
 }
 
 /** The provider to use, or a helpful error if it isn't set up. */
 export function pickProvider(p?: Provider): Provider {
   const chosen = p ?? defaultProvider() ?? (fakeMode() ? 'gemini' : null);
   if (!chosen) {
-    throw new Error('No image source configured. In .env set COMFYUI_URL=http://127.0.0.1:8188 (free, your own GPU - see docs/local-gpu.md) or GEMINI_API_KEY=... (paid), then reconnect the MCP server.');
+    throw new Error('No image source configured. Set one in .env (see .env.example): an API key (GEMINI_API_KEY, OPENAI_API_KEY, FAL_KEY or REPLICATE_API_TOKEN) or COMFYUI_URL for your own GPU, then reconnect the MCP server. Or use your own pictures (refs_import).');
   }
-  if (fakeMode()) return chosen;
-  if (chosen === 'gemini' && !hasApiKey()) throw new Error('provider gemini needs GEMINI_API_KEY in .env');
-  if (chosen === 'comfyui' && !comfyConfig()) throw new Error('provider comfyui needs COMFYUI_URL or COMFYUI_SSH in .env (see docs/local-gpu.md)');
+  if (!fakeMode() && !configured(chosen)) throw new Error(`provider ${chosen} needs ${NEEDS[chosen]} in .env`);
   return chosen;
 }
 
@@ -84,6 +101,12 @@ export async function generateImage(req: GenRequest): Promise<GenResult> {
       const r = await geminiGenerate({ ...req, model: req.model ?? MODELS.flash });
       appendLog(req, { provider, model: r.model, size, cost: r.costUsd, ms: Date.now() - started, interaction: r.interactionId });
       return { ...r, provider };
+    }
+    if (provider !== 'comfyui') {
+      const api = { openai: openaiGenerate, fal: falGenerate, replicate: replicateGenerate }[provider];
+      const r = await api({ prompt: req.prompt, refs: req.refs ?? [], aspectRatio: req.aspectRatio ?? '1:1', tag: req.tag });
+      appendLog(req, { provider, model: r.model, size, cost: r.costUsd, ms: Date.now() - started });
+      return { image: r.image, mime: r.mime, interactionId: null, text: '', costUsd: r.costUsd, model: r.model, provider };
     }
     const cfg = comfyConfig()!;
     const { width, height } = sizeFor(req.aspectRatio ?? '1:1', size, cfg.maxMP);
