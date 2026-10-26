@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { falGenerate, nearestRatio, openaiGenerate, replicateGenerate } from '../src/server/apis';
+import { falGenerate, nearestRatio, openaiGenerate, readInputs, replicateGenerate } from '../src/server/apis';
 import { defaultProvider, pickProvider } from '../src/server/imagegen';
 
 // A fake fetch: records every call and answers from a routing function.
@@ -37,7 +37,7 @@ describe('image APIs', () => {
     route(() => json({ data: [{ b64_json: png.toString('base64') }] }));
     const a = await openaiGenerate({ prompt: 'a fox', refs: [], aspectRatio: '3:4' });
     expect(calls[0].url).toBe('https://api.openai.com/v1/images/generations');
-    expect(JSON.parse(String(calls[0].init!.body))).toMatchObject({ model: 'gpt-image-1', size: '1024x1536', prompt: 'a fox' });
+    expect(JSON.parse(String(calls[0].init!.body))).toMatchObject({ model: 'gpt-image-2.5-sunburst', size: '1024x1536', prompt: 'a fox', quality: 'medium' });
     expect((calls[0].init!.headers as Record<string, string>).authorization).toBe('Bearer sk-test');
     expect(a.image.equals(png)).toBe(true);
 
@@ -50,18 +50,61 @@ describe('image APIs', () => {
     expect(form.get('size')).toBe('1024x1024');
   });
 
-  it('fal: edit model with data-URI references, then downloads the result', async () => {
+  // fal answers: the model schema (or 404), the CDN upload, the model run, the image download.
+  function falRoutes(schema: unknown) {
+    route((url, init) => {
+      if (url.startsWith('https://fal.ai/api/openapi/')) return schema ? json(schema) : json({ detail: 'not found' }, 404);
+      if (url.startsWith('https://rest.fal.ai/storage/upload/initiate')) return json({ upload_url: 'https://upload.example/put', file_url: 'https://v3.fal.media/files/ref.jpg' });
+      if (url === 'https://upload.example/put') return new Response(null, { status: init?.method === 'PUT' ? 200 : 405 });
+      if (url.startsWith('https://fal.run/')) return json({ images: [{ url: 'https://cdn.example/out.png' }] });
+      return new Response(new Uint8Array(png), { headers: { 'content-type': 'image/png' } });
+    });
+  }
+  const runBody = () => JSON.parse(String(calls.find((c) => c.url.startsWith('https://fal.run/'))!.init!.body));
+
+  it('fal: uploads references to the CDN and uses the field names from the model schema', async () => {
     process.env.FAL_KEY = 'fal-test';
-    route((url) => (url.startsWith('https://fal.run/') ? json({ images: [{ url: 'https://cdn.example/out.png' }] }) : new Response(new Uint8Array(png), { headers: { 'content-type': 'image/png' } })));
-    const r = await falGenerate({ prompt: 'back view', refs: [ref('HERO')], aspectRatio: '3:4' });
-    expect(calls[0].url).toBe('https://fal.run/fal-ai/nano-banana/edit');
-    expect((calls[0].init!.headers as Record<string, string>).authorization).toBe('Key fal-test');
-    const body = JSON.parse(String(calls[0].init!.body));
-    expect(body.image_urls[0]).toMatch(/^data:image\/jpeg;base64,/);
+    process.env.FAL_EDIT_MODEL = 'fal-ai/flux-pro/kontext';
+    // A model with ONE image field and its aspect ratios inside anyOf (like FLUX Kontext).
+    falRoutes({
+      paths: { '/fal-ai/flux-pro/kontext': { post: { requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/KontextInput' } } } } } } },
+      components: { schemas: { KontextInput: { properties: {
+        prompt: { type: 'string' }, image_url: { type: 'string' },
+        aspect_ratio: { anyOf: [{ type: 'string', enum: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'] }, { type: 'null' }] },
+        output_format: { enum: ['jpeg', 'png'] },
+      } } } },
+    });
+    const r = await falGenerate({ prompt: 'back view', refs: [ref('HERO')], aspectRatio: '2:3' });
+    const init = calls.find((c) => c.url.includes('/storage/upload/initiate'))!;
+    expect((init.init!.headers as Record<string, string>).authorization).toBe('Key fal-test');
+    expect(JSON.parse(String(init.init!.body)).content_type).toBe('image/jpeg');
+    const body = runBody();
+    expect(calls.find((c) => c.url.startsWith('https://fal.run/'))!.url).toBe('https://fal.run/fal-ai/flux-pro/kontext');
+    expect(body.image_url).toBe('https://v3.fal.media/files/ref.jpg');
+    expect(body.image_urls).toBeUndefined();
     expect(body.aspect_ratio).toBe('3:4');
-    expect(calls[1].url).toBe('https://cdn.example/out.png');
+    expect(body.output_format).toBe('png');
     expect(r.image.equals(png)).toBe(true);
-    expect(r.model).toBe('fal:fal-ai/nano-banana/edit');
+    expect(r.model).toBe('fal:fal-ai/flux-pro/kontext');
+  });
+
+  it("fal: without a readable schema it uses Nano Banana's fields", async () => {
+    process.env.FAL_KEY = 'fal-test';
+    falRoutes(null);
+    await falGenerate({ prompt: 'side view', refs: [ref('HERO'), ref('FRONT')], aspectRatio: '3:4' });
+    const body = runBody();
+    expect(calls.find((c) => c.url.startsWith('https://fal.run/'))!.url).toBe('https://fal.run/google/nano-banana-2.1/edit');
+    expect(body.image_urls).toEqual(['https://v3.fal.media/files/ref.jpg', 'https://v3.fal.media/files/ref.jpg']);
+    expect(body.aspect_ratio).toBe('3:4');
+  });
+
+  it('reads models that take named sizes instead of aspect ratios', () => {
+    const s = readInputs({
+      image_urls: { type: 'array', items: { format: 'uri' } },
+      image_size: { anyOf: [{ $ref: '#/components/schemas/ImageSize' }, { enum: ['square_hd', 'square', 'portrait_4_3', 'portrait_16_9', 'landscape_4_3', 'landscape_16_9'], type: 'string' }, { type: 'null' }] },
+    }, { ImageSize: { properties: { width: { type: 'integer' } } } });
+    expect(s).toMatchObject({ images: 'image_urls', many: true, aspect: null, png: false });
+    expect(s.sizes).toContain('portrait_4_3');
   });
 
   it('Replicate: reads the model schema, sends the right fields and polls until done', async () => {

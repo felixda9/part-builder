@@ -1,6 +1,6 @@
-// Image APIs besides Gemini: OpenAI (and services with the same API), fal.ai and Replicate.
-// Each takes a prompt plus optional reference images and returns one image. Model ids come from
-// .env, so any model on those services works; the defaults are good general image models.
+// Image APIs besides Gemini: OpenAI, fal.ai and Replicate. Each takes a prompt plus optional
+// reference images and returns one image. Model ids come from .env, so any image model on those
+// services works: fal and Replicate field names are read from the model's published schema.
 
 import sharp from 'sharp';
 import { log } from './paths';
@@ -17,7 +17,7 @@ export interface ApiResult {
   image: Buffer;
   mime: string;
   model: string;
-  costUsd: number;
+  costUsd: number; // estimate
 }
 
 const env = (k: string) => process.env[k]?.trim() || '';
@@ -71,12 +71,58 @@ async function download(url: string): Promise<{ image: Buffer; mime: string }> {
   return { image: Buffer.from(await res.arrayBuffer()), mime: res.headers.get('content-type') ?? 'image/png' };
 }
 
+// ------------------------------------------------------------------ model schemas (fal, Replicate)
+
+type Prop = { type?: string; format?: string; items?: Prop; enum?: string[]; anyOf?: Prop[]; allOf?: Prop[]; $ref?: string; properties?: Record<string, Prop> };
+
+/** The inputs a model takes: where the reference images go, and which sizes it allows. */
+export interface Inputs {
+  images: string | null;
+  many: boolean;
+  aspect: string[] | null; // aspect_ratio values like "3:4"
+  sizes: string[] | null; // image_size names like "portrait_4_3" (models without aspect_ratio)
+  png: boolean;
+}
+
+const RATIOS = ['21:9', '16:9', '3:2', '4:3', '5:4', '1:1', '4:5', '3:4', '2:3', '9:16'];
+/** Nano Banana's field names, used when a model's schema can't be read. */
+const NANO = (images: string): Inputs => ({ images, many: true, aspect: RATIOS, sizes: null, png: true });
+const IMAGE_FIELDS = ['image_urls', 'image_input', 'input_images', 'images', 'reference_images', 'image_url', 'input_image', 'image'];
+const NAMED_SIZES: Record<string, string> = { square_hd: '1:1', portrait_4_3: '3:4', portrait_16_9: '9:16', landscape_4_3: '4:3', landscape_16_9: '16:9' };
+
+export function readInputs(props: Record<string, Prop>, all: Record<string, Prop>): Inputs {
+  const resolve = (p?: Prop) => (p?.$ref ? all[p.$ref.split('/').pop()!] : p);
+  const enumOf = (p?: Prop): string[] | null => {
+    const r = resolve(p);
+    if (!r) return null;
+    if (r.enum) return r.enum;
+    for (const q of [...(r.anyOf ?? []), ...(r.allOf ?? [])]) { const e = enumOf(q); if (e) return e; }
+    return null;
+  };
+  const isArray = (p?: Prop): boolean => { const r = resolve(p); return r?.type === 'array' || !!r?.anyOf?.some(isArray); };
+  const isUri = (p?: Prop): boolean => { const r = resolve(p); return r?.format === 'uri' || r?.items?.format === 'uri' || !!r?.anyOf?.some(isUri); };
+  const images = IMAGE_FIELDS.find((n) => props[n]) ?? Object.keys(props).find((n) => isUri(props[n])) ?? null;
+  const aspect = enumOf(props.aspect_ratio)?.filter((a) => /^\d+:\d+$/.test(a)) ?? null;
+  const sizes = aspect?.length ? null : enumOf(props.image_size)?.filter((s) => NAMED_SIZES[s]) ?? null;
+  return { images, many: !!images && isArray(props[images]), aspect: aspect?.length ? aspect : null, sizes: sizes?.length ? sizes : null, png: !!enumOf(props.output_format)?.includes('png') };
+}
+
+/** Size fields for one request, from what the model allows. */
+function sizeFields(s: Inputs, want: string): Record<string, string> {
+  if (s.aspect) return { aspect_ratio: nearestRatio(want, s.aspect) };
+  if (s.sizes) {
+    const r = nearestRatio(want, s.sizes.map((n) => NAMED_SIZES[n]));
+    return { image_size: s.sizes.find((n) => NAMED_SIZES[n] === r)! };
+  }
+  return {};
+}
+
 // ------------------------------------------------------------------ OpenAI
 
 export const hasOpenAI = () => !!env('OPENAI_API_KEY');
-export const openaiModel = () => env('OPENAI_IMAGE_MODEL') || 'gpt-image-1';
+export const openaiModel = () => env('OPENAI_IMAGE_MODEL') || 'gpt-image-2.5-sunburst';
 
-/** OpenAI Images API (generations, or edits with the reference images). OPENAI_BASE_URL points it at a compatible service. */
+/** OpenAI Images API: generations, or edits with the reference images. */
 export async function openaiGenerate(request: ApiRequest): Promise<ApiResult> {
   const req = await compact(request);
   const base = (env('OPENAI_BASE_URL') || 'https://api.openai.com/v1').replace(/\/+$/, '');
@@ -89,74 +135,100 @@ export async function openaiGenerate(request: ApiRequest): Promise<ApiResult> {
     form.append('model', model);
     form.append('prompt', labelled(req));
     form.append('size', size);
-    req.refs.forEach((r, i) => form.append('image[]', new Blob([new Uint8Array(r.data)], { type: r.mime }), `image_${i + 1}.${r.mime.split('/')[1] ?? 'png'}`));
+    form.append('quality', 'medium');
+    req.refs.forEach((r, i) => form.append('image[]', new Blob([new Uint8Array(r.data)], { type: r.mime }), `image_${i + 1}.jpg`));
     body = await fetchJson(`${base}/images/edits`, { method: 'POST', headers, body: form }, 'OpenAI image edit');
   } else {
     body = await fetchJson(`${base}/images/generations`, {
       method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, prompt: req.prompt, size, n: 1 }),
+      body: JSON.stringify({ model, prompt: req.prompt, size, quality: 'medium', n: 1 }),
     }, 'OpenAI image');
   }
   const d = (body as { data?: { b64_json?: string; url?: string }[] }).data?.[0];
   const img = d?.b64_json ? { image: Buffer.from(d.b64_json, 'base64'), mime: 'image/png' } : d?.url ? await download(d.url) : null;
   if (!img) throw new Error('OpenAI returned no image');
-  return { ...img, model: `openai:${model}`, costUsd: Number(env('OPENAI_PRICE_PER_IMAGE') || 0.05) };
+  return { ...img, model: `openai:${model}`, costUsd: 0.02 };
 }
 
 // ------------------------------------------------------------------ fal.ai
 
 export const hasFal = () => !!env('FAL_KEY');
 /** FAL_MODEL makes images from text, FAL_EDIT_MODEL from reference images + text. */
-export const falModels = () => ({ text: env('FAL_MODEL') || 'fal-ai/nano-banana', edit: env('FAL_EDIT_MODEL') || 'fal-ai/nano-banana/edit' });
-const FAL_RATIOS = ['21:9', '16:9', '3:2', '4:3', '5:4', '1:1', '4:5', '3:4', '2:3', '9:16'];
+export const falModels = () => ({ text: env('FAL_MODEL') || 'google/nano-banana-2.1', edit: env('FAL_EDIT_MODEL') || 'google/nano-banana-2.1/edit' });
+const falSchemas = new Map<string, Inputs>();
 
-/** fal.ai, synchronous endpoint. Reference images go as data URIs, under both common field names. */
+async function falInputs(model: string): Promise<Inputs> {
+  const hit = falSchemas.get(model);
+  if (hit) return hit;
+  let out = NANO('image_urls');
+  try {
+    const j = await fetchJson(`https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=${encodeURIComponent(model)}`, {}, `fal schema ${model}`) as {
+      paths?: Record<string, { post?: { requestBody?: { content?: Record<string, { schema?: Prop }> } } }>; components?: { schemas?: Record<string, Prop> };
+    };
+    const all = j.components?.schemas ?? {};
+    const ref = j.paths?.[`/${model}`]?.post?.requestBody?.content?.['application/json']?.schema?.$ref;
+    const props = ref ? all[ref.split('/').pop()!]?.properties : undefined;
+    if (props) out = readInputs(props, all);
+  } catch (e) {
+    log(`fal: could not read the schema of ${model}, using Nano Banana's fields (${(e as Error).message})`);
+  }
+  falSchemas.set(model, out);
+  return out;
+}
+
+/** Put a reference image on fal's CDN (the way their client does) and return its URL. */
+async function falUpload(r: RefInput, i: number): Promise<string> {
+  const init = await fetchJson('https://rest.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3', {
+    method: 'POST', headers: { authorization: `Key ${env('FAL_KEY')}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ content_type: r.mime, file_name: `ref_${Date.now()}_${i + 1}.jpg` }),
+  }, 'fal upload') as { upload_url?: string; file_url?: string };
+  if (!init.upload_url || !init.file_url) throw new Error('fal upload: no upload URL returned');
+  const put = await fetch(init.upload_url, { method: 'PUT', body: new Uint8Array(r.data), headers: { 'content-type': r.mime } });
+  if (!put.ok) throw new Error(`fal upload failed: HTTP ${put.status}`);
+  return init.file_url;
+}
+
+/** fal.ai, synchronous endpoint. */
 export async function falGenerate(request: ApiRequest): Promise<ApiResult> {
   const req = await compact(request);
   const { text, edit } = falModels();
   const model = req.refs.length ? edit : text;
-  const input: Record<string, unknown> = {
-    prompt: labelled(req), num_images: 1, output_format: 'png', aspect_ratio: nearestRatio(req.aspectRatio, FAL_RATIOS),
-  };
+  const s = await falInputs(model);
+  const input: Record<string, unknown> = { prompt: labelled(req), num_images: 1, ...sizeFields(s, req.aspectRatio), ...(s.png ? { output_format: 'png' } : {}) };
   if (req.refs.length) {
-    input.image_urls = req.refs.map(dataUri);
-    input.image_url = dataUri(req.refs[0]);
+    if (!s.images) throw new Error(`fal model ${model} takes no input images; set FAL_EDIT_MODEL to an image-editing model`);
+    const urls = await Promise.all(req.refs.map(falUpload));
+    input[s.images] = s.many ? urls : urls[0];
   }
   const body = await fetchJson(`https://fal.run/${model}`, {
     method: 'POST', headers: { authorization: `Key ${env('FAL_KEY')}`, 'content-type': 'application/json' }, body: JSON.stringify(input),
   }, `fal ${model}`) as { images?: { url?: string }[]; image?: { url?: string } };
   const url = body.images?.[0]?.url ?? body.image?.url;
   if (!url) throw new Error(`fal ${model} returned no image`);
-  return { ...(await download(url)), model: `fal:${model}`, costUsd: Number(env('FAL_PRICE_PER_IMAGE') || 0.04) };
+  return { ...(await download(url)), model: `fal:${model}`, costUsd: 0.04 };
 }
 
 // ------------------------------------------------------------------ Replicate
 
 export const hasReplicate = () => !!env('REPLICATE_API_TOKEN');
-export const replicateModel = () => env('REPLICATE_MODEL') || 'google/nano-banana';
+export const replicateModel = () => env('REPLICATE_MODEL') || 'google/nano-banana-2.1';
+const replicateSchemas = new Map<string, Inputs>();
 
-interface ReplicateInputs { images: string | null; many: boolean; aspect: string[] | null; png: boolean }
-const schemas = new Map<string, ReplicateInputs>();
-
-/** Which inputs the model takes, from its published schema (field names differ per model). */
-async function replicateInputs(model: string, headers: Record<string, string>): Promise<ReplicateInputs> {
-  const hit = schemas.get(model);
+async function replicateInputs(model: string, headers: Record<string, string>): Promise<Inputs> {
+  const hit = replicateSchemas.get(model);
   if (hit) return hit;
-  const m = await fetchJson(`https://api.replicate.com/v1/models/${model}`, { headers }, `Replicate ${model}`) as {
-    latest_version?: { openapi_schema?: { components?: { schemas?: Record<string, { properties?: Record<string, Prop>; enum?: string[] }> } } };
-  };
-  type Prop = { type?: string; format?: string; items?: { format?: string }; enum?: string[]; allOf?: { $ref?: string }[] };
-  const all = m.latest_version?.openapi_schema?.components?.schemas ?? {};
-  const props = all.Input?.properties ?? {};
-  const enumOf = (p?: Prop) => p?.enum ?? (p?.allOf?.[0]?.$ref ? all[p.allOf[0].$ref.split('/').pop()!]?.enum : undefined) ?? null;
-  const names = ['image_input', 'input_images', 'images', 'image_urls', 'reference_images', 'input_image', 'image', 'image_url'];
-  const images = names.find((n) => props[n]) ?? Object.keys(props).find((n) => props[n].format === 'uri' || props[n].items?.format === 'uri') ?? null;
-  const out: ReplicateInputs = {
-    images, many: !!images && props[images].type === 'array',
-    aspect: props.aspect_ratio ? enumOf(props.aspect_ratio) : null,
-    png: !!enumOf(props.output_format)?.includes('png'),
-  };
-  schemas.set(model, out);
+  let out = NANO('image_input');
+  try {
+    const m = await fetchJson(`https://api.replicate.com/v1/models/${model}`, { headers }, `Replicate ${model}`) as {
+      latest_version?: { openapi_schema?: { components?: { schemas?: Record<string, Prop> } } };
+    };
+    const all = m.latest_version?.openapi_schema?.components?.schemas ?? {};
+    if (all.Input?.properties) out = readInputs(all.Input.properties, all);
+    else log(`Replicate: ${model} publishes no schema, using Nano Banana's fields`);
+  } catch (e) {
+    log(`Replicate: could not read the schema of ${model}, using Nano Banana's fields (${(e as Error).message})`);
+  }
+  replicateSchemas.set(model, out);
   return out;
 }
 
@@ -166,25 +238,23 @@ export async function replicateGenerate(request: ApiRequest): Promise<ApiResult>
   const model = replicateModel();
   const headers = { authorization: `Bearer ${env('REPLICATE_API_TOKEN')}` };
   const s = await replicateInputs(model, headers);
-  const input: Record<string, unknown> = { prompt: labelled(req) };
+  const input: Record<string, unknown> = { prompt: labelled(req), ...sizeFields(s, req.aspectRatio), ...(s.png ? { output_format: 'png' } : {}) };
   if (req.refs.length) {
     if (!s.images) throw new Error(`Replicate model ${model} takes no input images; set REPLICATE_MODEL to an image-editing model`);
     input[s.images] = s.many ? req.refs.map(dataUri) : dataUri(req.refs[0]);
   }
-  if (s.aspect?.length) input.aspect_ratio = nearestRatio(req.aspectRatio, s.aspect.filter((a) => /^\d+:\d+$/.test(a)));
-  if (s.png) input.output_format = 'png';
   type Pred = { status?: string; output?: string | string[]; error?: string; urls?: { get?: string } };
   let p = await fetchJson(`https://api.replicate.com/v1/models/${model}/predictions`, {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json', prefer: 'wait' }, body: JSON.stringify({ input }),
   }, `Replicate ${model}`) as Pred;
   const until = Date.now() + 10 * 60_000;
   while (p.status !== 'succeeded') {
-    if (p.status === 'failed' || p.status === 'canceled') throw new Error(`Replicate ${model} ${p.status}: ${p.error ?? ''}`);
+    if (p.status === 'failed' || p.status === 'canceled' || p.status === 'aborted') throw new Error(`Replicate ${model} ${p.status}: ${p.error ?? ''}`);
     if (!p.urls?.get || Date.now() > until) throw new Error(`Replicate ${model} did not finish`);
     await sleep(2000);
     p = await fetchJson(p.urls.get, { headers }, `Replicate ${model}`) as Pred;
   }
   const url = Array.isArray(p.output) ? p.output[0] : p.output;
   if (!url) throw new Error(`Replicate ${model} returned no image`);
-  return { ...(await download(url)), model: `replicate:${model}`, costUsd: Number(env('REPLICATE_PRICE_PER_IMAGE') || 0.04) };
+  return { ...(await download(url)), model: `replicate:${model}`, costUsd: 0.035 };
 }
