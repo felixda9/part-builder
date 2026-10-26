@@ -17,6 +17,7 @@ const page = await browser.newPage({ viewport: { width: 1500, height: 950 } });
 await page.goto(`http://localhost:${srv.port}/`);
 await page.waitForTimeout(1500);
 const shot = async (name: string) => { await page.waitForTimeout(700); await page.screenshot({ path: path.join(out, `${name}.png`) }); console.log('shot', name); };
+await shot('0_editor');
 await page.click('button:has-text("Review")');
 await shot('1_overlay_front');
 await page.click('.review .modes button:has-text("Lines")');

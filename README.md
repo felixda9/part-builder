@@ -12,6 +12,12 @@ corner wedges), rigged and ready for Studio.
    matches. You watch it happen in the editor.
 4. You get a rigged `.rbxmx` file, or the model is pushed straight into Roblox Studio.
 
+The editor: the model, its parts and the reference pictures.
+![The editor](docs/images/editor.jpg)
+
+The review screen: reference, model, overlay and line map for each view, with the score.
+![The review screen](docs/images/review.jpg)
+
 ## You need
 - [Claude Code](https://claude.com/claude-code)
 - Node.js (24 tested)
