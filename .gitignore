@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.runtime/
+.env
+projects/*/
+!projects/.gitkeep
+*.log
+
+# Style example images are local references (often screenshots of other games): not in git
+styles/*/*.png
+styles/*/*.jpg
+styles/*/*.jpeg
+styles/*/*.webp

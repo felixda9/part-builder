@@ -1,0 +1,7 @@
+{
+  "name": "roblox-game",
+  "description": "An in-game 3D model from a popular modern Roblox game, looking the way it does in a Roblox game screenshot: a low-poly game model assembled from simple box and wedge shapes, with smooth, matte, softly shaded surfaces in flat solid colors and crisp straight edges. Natural, believable proportions and anatomy, only slightly stylized and chunky - not a cute toy, no oversized head. Markings and color areas (stripes, spots, a light belly or chest, a dark tail tip, trim) are separate flat-colored pieces, never painted on. Small block eyes with a dark pupil, small white teeth and dark claws where they belong. Soft, even daylight like the Roblox game engine. It is a digital game model, not a physical toy: no toy bricks, no studs, no glossy plastic, no figurine look.",
+  "avoid": "LEGO, toy bricks, studs, toy figurine, action figure, glossy plastic, vinyl toy, chibi proportions with a giant head, realistic fur, painted or photo textures, gradients, smooth organic curves, spheres, cylinders, cartoon outlines, text, logos, watermarks, ground shadows, floors, scenery",
+  "model": "flash",
+  "notes": "Default look: chunky part-built models like in modern Roblox games, no studs. Drop up to 6 example screenshots (png/jpg) into this folder; they are sent to the image model as style examples."
+}

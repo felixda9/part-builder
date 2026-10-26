@@ -1,0 +1,7 @@
+{
+  "name": "roblox-parts",
+  "description": "A 3D game asset built ONLY from classic Roblox parts: rectangular blocks, wedges and corner wedges, like a model made in Roblox Studio. Every surface is flat solid plastic in a single color, with small square Roblox studs on the surfaces. Crisp hard edges and right angles. Chunky, simple, readable proportions with a limited palette. Clean neutral studio lighting with soft, even shading.",
+  "avoid": "curves, spheres, cylinders, rounded or organic shapes, fur, cloth folds, realistic or painted textures, gradients, outlines, text, logos, watermarks, ground shadows, floors, scenery",
+  "model": "flash",
+  "notes": "Drop up to 6 example screenshots (png/jpg) of part-built Roblox models you like into this folder; they are sent to the image model as style examples."
+}

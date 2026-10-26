@@ -1,0 +1,75 @@
+{
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "MB_REF_1"
+    }
+  },
+  "27": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "43",
+        0
+      ],
+      "filename_prefix": "part-builder-rembg"
+    },
+    "_meta": {
+      "title": "MB_OUTPUT"
+    }
+  },
+  "40": {
+    "class_type": "LoadBackgroundRemovalModel",
+    "inputs": {
+      "bg_removal_name": "birefnet.safetensors"
+    }
+  },
+  "41": {
+    "class_type": "RemoveBackground",
+    "inputs": {
+      "bg_removal_model": [
+        "40",
+        0
+      ],
+      "image": [
+        "10",
+        0
+      ]
+    }
+  },
+  "42": {
+    "class_type": "EmptyImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1,
+      "color": 16711935
+    },
+    "_meta": {
+      "title": "MB_KEY"
+    }
+  },
+  "43": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {
+      "destination": [
+        "42",
+        0
+      ],
+      "source": [
+        "10",
+        0
+      ],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": [
+        "41",
+        0
+      ]
+    }
+  }
+}

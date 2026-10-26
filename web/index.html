@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>part-builder</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="toolbar"></header>
+      <aside id="left">
+        <section id="outliner" class="panel"></section>
+        <section id="checks" class="panel"></section>
+        <section id="timeline" class="panel"></section>
+      </aside>
+      <main id="viewport"></main>
+      <aside id="right">
+        <section id="properties" class="panel"></section>
+        <section id="refs" class="panel"></section>
+      </aside>
+      <footer id="status"></footer>
+    </div>
+    <div id="toasts"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
